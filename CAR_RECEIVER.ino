@@ -33,18 +33,24 @@ CRGB status_leds[NUM_STATUS_LED];
 HardwareSerial neogps(1);
 TinyGPSPlus gps;
 
-unsigned long gpsPrevMillis = 0;
-const unsigned long gpsUpdateInterval = 1000;
-const int portalOpenTime = 300000; //server open for 5 mins
+unsigned long updatePrevMillis = 0;
+const unsigned long updateInterval = 25000;
+const int portalOpenTime = 300000;
 const int freq = 10000;
 const int pwmChanel = 0;
 const int pwmResolution = 8;
+const int numBatReadings = 30;
+int indexNo = 0;
 bool onDemand;
 String firebaseStatus = "";
+float total = 0.0;
 float latt = 00.000000;
 float lngi = 00.000000;
 float gpsSpeed = 0;
-float batteryValue;
+float speedNow = 0;
+float batteryValue = 11.99;
+float blcValue = 11.99;
+float bhcValue = 12.5;
 uint8_t throttleValue;
 uint8_t forwardValue;
 uint8_t backwardValue;
@@ -65,6 +71,7 @@ SemaphoreHandle_t variableMutex;
 void setup() {
   Serial.begin(115200);
   neogps.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
+  delay(500);
 
   if (!SPIFFS.begin(true)) {
     Serial.println("An error occurred while mounting SPIFFS");
@@ -196,7 +203,6 @@ void connectWiFi() {
   delay(50);
   bool success = false;
   while (!success) {
-    //    Serial.println("AP - espSmartHome  Setup IP - 192.168.4.1");
     wm.setConfigPortalTimeout(60);
     success = wm.autoConnect("ESP.CAR");
     if (!success) {
@@ -225,7 +231,6 @@ void onDemandFirebaseConfig() {
 void decodeData(String data) {
 
   Serial.println(data); //For Example=> {"value1":"\"on\"","value2":"\"on\"","value3":"\"off\"","value4":"\"off\""}
-
   /*
       goto website https://arduinojson.org/v6/assistant/#/step1
       select board
@@ -233,18 +238,17 @@ void decodeData(String data) {
       and paste your JSON data
       it automatically generate your code
   */
-
-
   StaticJsonDocument<385> doc;
   DeserializationError error = deserializeJson(doc, data);
 
   if (error) {
-    //    Serial.print(F("deserializeJson() failed: "));
     Serial.println(error.f_str());
     return;
   }
 
   backwardValue = doc["BACKWARD"];
+  bhcValue = doc["BHC"];
+  blcValue = doc["BLC"];
   forwardValue = doc["FORWARD"];
   gpsValue = doc["GPS"];
   headlightValue = doc["HL"];
@@ -268,9 +272,7 @@ void showLedStatus(uint8_t r, uint8_t g, uint8_t b ) {
   status_leds[STATUS_LED_POSI] = CRGB(r, g, b);;
   FastLED.show();
 }
-
 ///////////////////////////////////////////////////////////////
-
 void loading()
 {
   static uint16_t sPseudotime = 0;
@@ -311,7 +313,6 @@ void loading()
     nblend( status_leds[pixelnumber], newcolor, 64);
   }
 }
-
 ///////////////////////////////////////////////////////////////
 void gpsReadings() {
   if (gpsValue == 1) {
@@ -319,50 +320,69 @@ void gpsReadings() {
     if (neogps.available() > 0) {
       if (gps.encode(neogps.read())) {
         if (gps.location.isUpdated()) {
-          latt = gps.location.lat(), 6;
-          lngi = gps.location.lng(), 6;
+          latt = gps.location.lat();
+          lngi = gps.location.lng();
         }
         if (gps.satellites.isUpdated()) {
           satNo = gps.satellites.value();
         }
         if (gps.speed.isUpdated()) {
-          gpsSpeed = gps.speed.kmph(), 0;
+          speedNow = gps.speed.mps();
         }
       }
     }
   }
 }
 ///////////////////////////////////////////////////////////////
-void gpsReadingsUpload() {
-  if (gpsValue == 1) {
-    unsigned long currentMillis = millis();
-    if (currentMillis - gpsPrevMillis >= gpsUpdateInterval) {
-      gpsPrevMillis = gpsUpdateInterval;
-
-      Serial.print("Lat:");
-      Serial.print(latt, 6);
-      Serial.print(" Lng:");
-      Serial.print(lngi, 6);
-      Serial.print(" Sat:");
-      Serial.print(satNo);
-      Serial.print(" km/h:");
-      Serial.println(gpsSpeed, 0);
-
-      Firebase.setFloat(firebaseData, "/ESP-CAR/LAT", latt);
-      Firebase.setFloat(firebaseData, "/ESP-CAR/LNG", lngi);
-      Firebase.setInt(firebaseData, "/ESP-CAR/SAT", satNo);
-      Firebase.setFloat(firebaseData, "/ESP-CAR/SPEED", gpsSpeed);
-
-    }
+void speedDataUpload() {
+  if (abs(speedNow - gpsSpeed) >= 1) {
+    gpsSpeed = speedNow;
+    Firebase.setFloat(firebaseData, "/ESP-CAR/SPEED", gpsSpeed);
   }
 }
 ///////////////////////////////////////////////////////////////
-void readBatteryVoltage() {
-  int readValue = analogRead(BATTERY_PIN);
-  batteryValue = readValue * 0.0041831;
+void gpsAndBatDataUpload() {
+
+  unsigned long currentMillis = millis();
+  if (currentMillis - updatePrevMillis >= updateInterval) {
+    updatePrevMillis = currentMillis;
+    float averageVolt = total / indexNo;
+    if (averageVolt >= blcValue && averageVolt <= bhcValue) {
+      batteryValue = averageVolt;
+    }
+    if (averageVolt <= blcValue) {
+      batteryValue = blcValue;
+    }
+    if (averageVolt >= bhcValue) {
+      batteryValue = bhcValue - 0.1;
+    }
+    uploadAllData();
+    Serial.print("Average Volt: ");
+    Serial.println(averageVolt);
+    total = 0;
+    indexNo = 0;
+  }
+  int pwmValue = analogRead(BATTERY_PIN);
+  float volt = pwmValue * 0.0041831;
+  total += volt;
+  indexNo++;
 }
 ///////////////////////////////////////////////////////////////
-void uploadBatteryVolt() {
+void uploadAllData() {
+  if (gpsValue == 1) {
+    Serial.print("Lat:");
+    Serial.print(latt, 6);
+    Serial.print(" Lng:");
+    Serial.print(lngi, 6);
+    Serial.print(" Sat:");
+    Serial.print(satNo);
+    Serial.print(" m/s:");
+    Serial.println(gpsSpeed, 2);
+    Firebase.setFloat(firebaseData, "/ESP-CAR/LAT", latt);
+    Firebase.setFloat(firebaseData, "/ESP-CAR/LNG", lngi);
+    Firebase.setInt(firebaseData, "/ESP-CAR/SAT", satNo);
+    Firebase.setFloat(firebaseData, "/ESP-CAR/SPEED", gpsSpeed);
+  }
   Firebase.setFloat(firebaseData, "/ESP-CAR/BATTERY", batteryValue);
 }
 ///////////////////////////////////////////////////////////////
@@ -396,7 +416,7 @@ void turnLeft(uint8_t isActive, uint8_t rpm) {
     ledcWrite(pwmChanel, rpm);
     digitalWrite(RIGHT_FORWARD, HIGH);
     digitalWrite(LEFT_BACKWARD, HIGH);
-  } 
+  }
 }
 void turnRight(uint8_t isActive, uint8_t rpm) {
   if (isActive == 1) {
@@ -428,12 +448,9 @@ void loop1(void * parameter) {
     if (WiFi.status() == WL_CONNECTED && firebaseStatus == "ok") {
       showLedStatus(0, 255, 0);
       gpsReadings();
-      readBatteryVoltage();
       controllNavigation();
       blowHorn();
-      
     }
-
     if (onDemand == true) {
       loading();
       FastLED.show();
@@ -444,31 +461,25 @@ void loop1(void * parameter) {
     }
   }
 }
-
-
-
-
-
 //////////////////////////////////////////////////////////////
 
 void loop() {
-
   onDemand = false;
   onDemandFirebaseConfig();
 
-
   if (firebaseStatus == "ok") {
-    gpsReadingsUpload();
-    uploadBatteryVolt();
-    
+    if (backwardValue != 1 && forwardValue != 1 && leftValue != 1 && rightValue != 1) {
+      gpsAndBatDataUpload();
+      
+    }
+//    gpsAndBatDataUpload();
+    speedDataUpload();
     Firebase.getString(firebaseData, "/ESP-CAR");
     decodeData(firebaseData.stringData());
-
   }
   else {
     Serial.println("firebase failed");
   }
-
 
   if (firebaseStatus != "ok") {
     if (WiFi.status() == WL_CONNECTED) {
@@ -476,5 +487,4 @@ void loop() {
       decodeData(firebaseData.stringData());
     }
   }
-
 }
