@@ -63,7 +63,10 @@ uint8_t gpsValue;
 
 
 FirebaseData firebaseData;
+FirebaseAuth auth;
+FirebaseConfig config;
 AsyncWebServer server(80);
+
 Preferences preferences;
 TaskHandle_t Task1;
 SemaphoreHandle_t variableMutex;
@@ -99,7 +102,9 @@ void setup() {
   delay(500);
 
   connectWiFi();
+  delay(500);
   connectFirebase();
+  delay(500);
 
   variableMutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(
@@ -120,8 +125,15 @@ void connectFirebase() {
   if (preferences.getString("firebaseUrl", "") != "" && preferences.getString("firebaseToken", "") != "") {
     Serial.println("Firebase settings already exist. Checking Firebase connection...");
 
-    Firebase.begin(preferences.getString("firebaseUrl", ""), preferences.getString("firebaseToken", ""));
+    String firebaseUrl = preferences.getString("firebaseUrl", "");
+    String firebaseToken = preferences.getString("firebaseToken", "");
+    config.database_url = firebaseUrl;
+    config.api_key = firebaseToken;
+    Firebase.signUp(&config, &auth, "", "");  //for anonymous user
     delay(100);
+    Firebase.begin(&config, &auth);
+    delay(100);
+
     Firebase.reconnectWiFi(true);
     delay(100);
 
@@ -155,8 +167,13 @@ void setupServer() {
     preferences.putString("firebaseUrl", firebaseUrl);
     preferences.putString("firebaseToken", firebaseToken);
 
-    Firebase.begin(firebaseUrl, firebaseToken);
+    config.database_url = firebaseUrl;
+    config.api_key = firebaseToken;
+    Firebase.signUp(&config, &auth, "", "");  //for anonymous user
     delay(100);
+    Firebase.begin(&config, &auth);
+    delay(100);
+    
     Firebase.reconnectWiFi(true);
     delay(100);
 
